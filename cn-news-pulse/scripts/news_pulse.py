@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import html
 import json
@@ -20,6 +21,7 @@ from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Iterable, Optional
+from urllib.parse import urljoin
 
 
 CN_TZ = timezone(timedelta(hours=8))
@@ -68,6 +70,27 @@ DEFAULT_FEEDS = (
         "https://www.chinanews.com.cn/rss/world.xml",
         0.88,
         "国际",
+    ),
+    NewsFeed(
+        "中国新闻网·社会",
+        "中国新闻网",
+        "https://www.chinanews.com.cn/rss/society.xml",
+        0.88,
+        "社会",
+    ),
+    NewsFeed(
+        "中国新闻网·健康",
+        "中国新闻网",
+        "https://www.chinanews.com.cn/rss/health.xml",
+        0.88,
+        "健康",
+    ),
+    NewsFeed(
+        "中国新闻网·教育",
+        "中国新闻网",
+        "https://www.chinanews.com.cn/rss/edu.xml",
+        0.88,
+        "教育",
     ),
     NewsFeed(
         "IT之家",
@@ -233,6 +256,11 @@ def parse_datetime(value: str) -> Optional[datetime]:
     text = clean_text(value)
     if not text:
         return None
+    text = re.sub(
+        r"^(\d{4}-\d{2}-\d{2})-(\d{2}:\d{2}(?::\d{2})?)$",
+        r"\1 \2",
+        text,
+    )
     try:
         dt = parsedate_to_datetime(text)
     except (TypeError, ValueError, OverflowError):
@@ -596,6 +624,189 @@ def load_feeds(
     return all_items, statuses
 
 
+def meta_value(markup: str, name: str) -> str:
+    wanted = name.lower()
+    for tag in re.findall(r"<meta\b[^>]*>", markup, re.I):
+        name_match = re.search(r"""name\s*=\s*["']([^"']+)["']""", tag, re.I)
+        if not name_match or name_match.group(1).lower() != wanted:
+            continue
+        content_match = re.search(r"""content\s*=\s*["']([^"']*)["']""", tag, re.I)
+        if content_match:
+            return html.unescape(content_match.group(1)).strip()
+    return ""
+
+
+def first_article_paragraph(markup: str) -> str:
+    candidates = []
+    for value in re.findall(r"<p\b[^>]*>(.*?)</p>", markup, re.I | re.S):
+        text = clean_text(value, 700)
+        if len(text) >= 25:
+            candidates.append(text)
+    if not candidates:
+        return ""
+    preferred = [
+        text
+        for text in candidates
+        if not text.startswith(("责任编辑", "分享", "相关阅读", "新华网"))
+    ]
+    return (preferred or candidates)[0]
+
+
+def fetch_html_article(
+    link: str,
+    title_hint: str,
+    source_name: str,
+    publisher: str,
+    category: str,
+    authority: float,
+    timeout: int,
+) -> Optional[NewsItem]:
+    try:
+        data, content_type = fetch_bytes(link, timeout)
+        markup = decode_response(data, content_type)
+    except Exception:
+        return None
+
+    title = (
+        clean_text(meta_value(markup, "og:title"), 240)
+        or clean_text(title_hint, 240)
+    )
+    if not title:
+        return None
+
+    time_text = (
+        meta_value(markup, "firstpublishedtime")
+        or meta_value(markup, "publishdate")
+    )
+    if not time_text or not re.search(r"\d{2}:\d{2}", time_text):
+        match = re.search(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})", markup)
+        if match:
+            time_text = f"{match.group(1)} {match.group(2)}"
+    published_at = parse_datetime(time_text)
+
+    summary = (
+        clean_text(meta_value(markup, "description"), 700)
+        or first_article_paragraph(markup)
+        or title
+    )
+    return NewsItem(
+        source_id=fed_id(source_name),
+        source=source_name,
+        publisher=publisher,
+        category=category,
+        authority=authority,
+        title=title,
+        url=link,
+        summary=summary,
+        published_at=published_at,
+    )
+
+
+def extract_site_links(
+    homepage: str,
+    base_url: str,
+    pattern: str,
+    limit: int,
+) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for href, title in re.findall(pattern, homepage, re.I | re.S):
+        url = urljoin(base_url, html.unescape(href))
+        title = clean_text(title, 200)
+        if not title or len(title) < 6 or url in seen:
+            continue
+        seen.add(url)
+        rows.append((url, title))
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def load_site_news(
+    timeout: int,
+    cutoff: datetime,
+    max_items_per_site: int = 10,
+) -> tuple[list[NewsItem], list[SourceStatus]]:
+    sites = (
+        {
+            "name": "中国政府网·要闻",
+            "publisher": "中国政府网",
+            "home": "https://www.gov.cn/",
+            "base": "https://www.gov.cn/",
+            "pattern": r"""href=["'](https://www\.gov\.cn/yaowen/liebiao/\d{6}/content_\d+\.htm)["'][^>]*>\s*([^<]{6,160})""",
+            "category": "时政",
+            "authority": 0.96,
+        },
+        {
+            "name": "新华网·要闻",
+            "publisher": "新华网",
+            "home": "https://www.news.cn/",
+            "base": "https://www.news.cn/",
+            "pattern": r"""href=["']((?:https?://www\.news\.cn)?/?[^"']*?\d{8}/[0-9a-f]{32}/c\.html)["'][^>]*>\s*([^<]{6,160})""",
+            "category": "综合",
+            "authority": 0.93,
+        },
+    )
+    items: list[NewsItem] = []
+    statuses: list[SourceStatus] = []
+    for site in sites:
+        try:
+            data, content_type = fetch_bytes(site["home"], timeout)
+            homepage = decode_response(data, content_type)
+            links = extract_site_links(
+                homepage,
+                site["base"],
+                site["pattern"],
+                max_items_per_site,
+            )
+            if not links:
+                raise ValueError("no article links found on homepage")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [
+                    executor.submit(
+                        fetch_html_article,
+                        url,
+                        title,
+                        site["name"],
+                        site["publisher"],
+                        site["category"],
+                        site["authority"],
+                        timeout,
+                    )
+                    for url, title in links
+                ]
+                fetched = [future.result() for future in futures]
+            parsed = [
+                item
+                for item in fetched
+                if item is not None
+                and (item.published_at is None or item.published_at >= cutoff)
+            ]
+            items.extend(parsed)
+            statuses.append(
+                SourceStatus(
+                    site["name"],
+                    "news",
+                    bool(parsed),
+                    len(parsed),
+                    "首页文章解析正常" if parsed else "首页文章不在时间窗口内",
+                    site["home"],
+                )
+            )
+        except Exception as exc:
+            statuses.append(
+                SourceStatus(
+                    site["name"],
+                    "news",
+                    False,
+                    0,
+                    f"{type(exc).__name__}: {exc}",
+                    site["home"],
+                )
+            )
+    return items, statuses
+
+
 def load_hot_clues(
     timeout: int,
     include_baidu: bool,
@@ -840,6 +1051,30 @@ def parse_rss_spec(value: str) -> str:
     return value
 
 
+def event_why_important(event: Event) -> list[str]:
+    text = event.title + " " + event.summary
+    publishers = {item.publisher for item in event.items}
+    official_count = len({item.publisher for item in event.items if item.authority >= 0.90})
+    reasons: list[str] = []
+    if official_count:
+        reasons.append("已有政府网站或中央媒体直接来源")
+    if len(publishers) >= 2:
+        reasons.append(f"{len(publishers)} 个独立出版方形成交叉报道")
+    if any(term in text for term in TECH_TERMS):
+        reasons.append("涉及科技、产业或数字基础设施")
+    if any(term in text for term in ("政策", "立法", "条例", "标准", "通知", "决定")):
+        reasons.append("可能影响公共规则、行业标准或办事流程")
+    if any(term in text for term in ("事故", "预警", "失联", "通报", "调查", "处罚", "安全")):
+        reasons.append("涉及公共安全、风险或监管进展")
+    if any(term in text for term in ("启动", "发布", "首次", "成功", "突破", "签署")):
+        reasons.append("包含可核实的阶段性进展或首次发生事项")
+    if event.hot_clues:
+        best_rank = min(clue.rank for clue in event.hot_clues)
+        if best_rank <= 20:
+            reasons.append(f"进入热榜前 {best_rank} 位，公众关注度较高")
+    return reasons[:4] or ["当前主要依据新闻时效与来源完整性进入候选列表"]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="汇总国内公开新闻RSS与热榜线索，按事件去重并生成简报。"
@@ -865,6 +1100,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-hot", action="store_true", help="不抓取百度热搜和B站热门")
     parser.add_argument("--no-baidu", action="store_true", help="不抓取百度热搜")
     parser.add_argument("--no-bilibili", action="store_true", help="不抓取B站热门")
+    parser.add_argument("--no-site-news", action="store_true", help="不抓取政府和新华网首页要闻")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="单请求超时秒数")
     parser.add_argument("--max-items-per-feed", type=int, default=100, help="每个RSS最多读取条数")
     parser.add_argument("--self-test", action="store_true", help="运行离线自检")
@@ -873,7 +1109,35 @@ def build_parser() -> argparse.ArgumentParser:
 
 def event_to_dict(event: Event) -> dict:
     publishers = sorted({item.publisher for item in event.items})
+    official_publishers = sorted(
+        {item.publisher for item in event.items if item.authority >= 0.90}
+    )
+    ordered_items = sorted(
+        event.items,
+        key=lambda row: row.published_at or datetime.min.replace(tzinfo=CN_TZ),
+        reverse=True,
+    )
+    timeline = []
+    seen_urls: set[str] = set()
+    for item in sorted(
+        event.items,
+        key=lambda row: row.published_at or datetime.min.replace(tzinfo=CN_TZ),
+    ):
+        if not item.url or item.url in seen_urls:
+            continue
+        seen_urls.add(item.url)
+        timeline.append(
+            {
+                "time": iso_time(item.published_at),
+                "source": item.source,
+                "publisher": item.publisher,
+                "title": item.title,
+                "url": item.url,
+                "tier": "official" if item.authority >= 0.90 else "media",
+            }
+        )
     return {
+        "event_id": sha1(normalize_title(event.title)),
         "title": event.title,
         "summary": event.summary,
         "status": event.status,
@@ -883,6 +1147,9 @@ def event_to_dict(event: Event) -> dict:
         "first_seen": iso_time(event.first_seen),
         "last_updated": iso_time(event.last_updated),
         "publishers": publishers,
+        "official_publishers": official_publishers,
+        "why_important": event_why_important(event),
+        "timeline": timeline,
         "sources": [
             {
                 "name": item.source,
@@ -891,11 +1158,7 @@ def event_to_dict(event: Event) -> dict:
                 "url": item.url,
                 "published_at": iso_time(item.published_at),
             }
-            for item in sorted(
-                event.items,
-                key=lambda row: row.published_at or datetime.min.replace(tzinfo=CN_TZ),
-                reverse=True,
-            )
+            for item in ordered_items
         ],
         "hot_clues": [asdict(clue) for clue in event.hot_clues],
     }
@@ -994,6 +1257,9 @@ def render_markdown(payload: dict) -> str:
                 f"**{event['status']} · 优先级 {event['score']:.1f} · 置信度 {event['confidence']}**"
             )
             lines.append("")
+            if event.get("why_important"):
+                lines.append("为什么重要：" + "；".join(event["why_important"]) + "。")
+                lines.append("")
             lines.append(clip_summary(event["summary"]) or "暂无摘要。")
             lines.append("")
             lines.append(
@@ -1313,6 +1579,14 @@ def main() -> int:
     news_items, news_status = load_feeds(
         args.rss, args.timeout, cutoff, args.max_items_per_feed
     )
+    if not args.no_site_news:
+        site_items, site_status = load_site_news(
+            args.timeout,
+            cutoff,
+            max_items_per_site=10,
+        )
+        news_items.extend(site_items)
+        news_status.extend(site_status)
     hot_clues: list[HotClue] = []
     hot_status: list[SourceStatus] = []
     if not args.no_hot:

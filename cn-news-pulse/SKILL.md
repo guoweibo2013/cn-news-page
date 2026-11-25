@@ -5,7 +5,7 @@ description: 汇总国内公开新闻与热榜线索，按事件去重、核实�
 
 # 国内时事简报
 
-使用随附脚本聚合公开新闻 RSS、百度热搜和B站热榜，输出事件级简报。脚本负责抓取、去重、聚类、排序和渲染；你负责检查输出、解释不确定性，并在需要时补充网页核验。
+使用随附脚本聚合公开新闻 RSS、政府与中央媒体要闻、百度热搜和B站热榜，输出事件级简报。脚本负责抓取、去重、聚类、排序和渲染；你负责检查输出、解释不确定性，并在需要时补充网页核验。
 
 ## 基本流程
 
@@ -28,10 +28,19 @@ python3 "$SKILL_DIR/scripts/news_pulse.py" "神舟二十四号" --hours 72 --emi
 需要把“今日要闻、神舟二十四号、6小时科技”合成一个可离线打开、可切换和搜索的页面时：
 
 ```bash
-python3 "$SKILL_DIR/scripts/build_standalone.py" --output /absolute/path/cn-news-dashboard.html
+python3 "$SKILL_DIR/scripts/build_standalone.py" \
+  --output /absolute/path/index.html \
+  --cache-dir "$SKILL_DIR/.cache" \
+  --fail-if-empty
 ```
 
-该页面是生成时的数据快照；重新执行命令即可更新。
+该页面包含事件详情、时间线、来源对比、官方来源标签、新事件/更新状态、关键词关注、阅读记录、分享链接、PWA安装和15分钟自动刷新。页面目录还会生成：
+
+- `manifest.webmanifest` 和 `sw.js`：安装与离线缓存
+- `digest.md`：当日摘要
+- `digest.xml`：可订阅的 Atom 日报
+
+`--cache-dir` 保存跨运行事件状态和来源健康历史；省略时仍会生成页面，但无法识别“新事件/刚刚更新”。`--fail-if-empty` 用于云端发布，避免用空页面覆盖上一份成功结果。
 
 用户要求科技、财经、时政等分类新闻时，使用 `--category`，不要把“科技”等分类词简单当作关键词：
 
@@ -42,6 +51,7 @@ python3 "$SKILL_DIR/scripts/news_pulse.py" --category tech --hours 6 --emit mark
 ## 输出原则
 
 - 新闻RSS是事实候选来源；百度热搜和B站热榜只是注意力线索，不能单独证明事件属实。
+- 中国政府网、新华网和权威媒体的直接来源优先于聚合热榜。
 - “单源报道”不是假新闻的同义词，但应明确提示尚缺独立印证。
 - 时效、来源等级、独立来源数量、热榜关注度共同决定排序；点赞和热搜不能压过来源质量。
 - 突发事件应写明首次出现时间、最近更新时间以及仍未确认的部分。

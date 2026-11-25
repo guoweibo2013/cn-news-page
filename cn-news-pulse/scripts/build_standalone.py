@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import struct
 import sys
+import zlib
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -56,6 +58,10 @@ HTML_TEMPLATE = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#17233d">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon-192.png">
   <title>国内时事简报 · CN News Pulse</title>
   <style>
     :root {
@@ -292,6 +298,149 @@ HTML_TEMPLATE = r"""<!doctype html>
       transition: .18s ease;
     }
     .toast.show { opacity: 1; transform: translateY(0); }
+    .change {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: #f0f3f8;
+      color: #6b778b;
+      font-size: 9px;
+      font-weight: 700;
+    }
+    .change.new { background: #fff0ed; color: #c64e45; }
+    .change.updated { background: #fff5df; color: #966412; }
+    .open-event {
+      margin: 10px 0 0;
+      padding: 0;
+      border: 0;
+      color: var(--blue);
+      background: transparent;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .open-event:hover { text-decoration: underline; }
+    button.event-title {
+      padding: 0;
+      border: 0;
+      color: var(--ink);
+      background: transparent;
+      text-align: left;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button.event-title:hover { color: var(--blue); }
+    .watchbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255,255,255,.8);
+    }
+    .watchbar strong { font-size: 12px; white-space: nowrap; }
+    .watchbar input {
+      min-width: 150px;
+      flex: 0 1 260px;
+      padding: 8px 11px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      outline: none;
+    }
+    .watchbar button {
+      padding: 8px 12px;
+      border: 0;
+      border-radius: 9px;
+      color: white;
+      background: var(--blue);
+      cursor: pointer;
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 7px; flex: 1; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: var(--blue-soft);
+      color: var(--blue);
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .chip button { padding: 0; border: 0; color: inherit; background: transparent; cursor: pointer; }
+    .refresh-state { color: #9fb2cc; font-size: 10px; }
+    .health-strip { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
+    .health-dot { width: 9px; height: 9px; border-radius: 50%; background: #cfd8e5; }
+    .health-dot.ok { background: var(--green); }
+    .health-dot.fail { background: var(--red); }
+    dialog {
+      width: min(760px, calc(100% - 24px));
+      max-height: min(86vh, 900px);
+      padding: 0;
+      border: 0;
+      border-radius: 24px;
+      color: var(--ink);
+      background: white;
+      box-shadow: 0 30px 80px rgba(17, 35, 61, .28);
+    }
+    dialog::backdrop { background: rgba(17, 28, 48, .52); backdrop-filter: blur(4px); }
+    .dialog-head {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: center;
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.96);
+      backdrop-filter: blur(12px);
+    }
+    .dialog-head h2 { margin: 0; font-size: 21px; }
+    .dialog-actions { display: flex; gap: 8px; }
+    .dialog-actions button {
+      padding: 7px 11px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      color: var(--ink);
+      background: white;
+      cursor: pointer;
+    }
+    .dialog-body { padding: 22px; }
+    .reason-list { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0 18px; }
+    .reason {
+      padding: 6px 10px;
+      border-radius: 9px;
+      background: #f3f6fa;
+      color: #536078;
+      font-size: 11px;
+    }
+    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .detail-box { padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: #f9fbfd; }
+    .detail-box h3 { margin: 0 0 9px; padding: 0; font-size: 14px; }
+    .detail-box p { margin: 0; color: #536078; font-size: 12px; }
+    .timeline { margin: 16px 0 0; padding: 0; list-style: none; }
+    .timeline li { position: relative; padding: 0 0 18px 22px; border-left: 2px solid #dfe6f0; }
+    .timeline li:last-child { border-left-color: transparent; padding-bottom: 0; }
+    .timeline li::before {
+      content: "";
+      position: absolute;
+      left: -6px;
+      top: 3px;
+      width: 10px;
+      height: 10px;
+      border: 2px solid white;
+      border-radius: 50%;
+      background: var(--blue);
+    }
+    .timeline li.official::before { background: var(--green); }
+    .timeline time { display: block; color: var(--muted); font-size: 10px; }
+    .timeline a { display: block; color: var(--ink); font-size: 12px; font-weight: 600; text-decoration: none; }
+    .read-badge { color: var(--muted); font-size: 9px; }
     @media (max-width: 980px) {
       .topbar { align-items: flex-start; flex-wrap: wrap; }
       .tabs { order: 3; flex-basis: 100%; justify-content: flex-start; overflow-x: auto; }
@@ -304,7 +453,14 @@ HTML_TEMPLATE = r"""<!doctype html>
       .shell { width: min(100% - 20px, 1240px); margin-top: 10px; }
       .topbar { padding: 13px; border-radius: 17px; }
       .brand { min-width: 0; }
-      .snapshot { display: none; }
+      .snapshot {
+        display: block;
+        width: 100%;
+        margin-left: 0;
+        padding-top: 8px;
+        border-top: 1px solid var(--line);
+        text-align: left;
+      }
       .tab { padding: 9px 12px; white-space: nowrap; }
       .hero { padding: 24px 20px; border-radius: 21px; }
       .stats { grid-template-columns: repeat(3, 1fr); }
@@ -314,6 +470,9 @@ HTML_TEMPLATE = r"""<!doctype html>
       .lead-grid { grid-template-columns: 1fr; }
       .event { min-height: 0; }
       .section-head { align-items: flex-start; flex-direction: column; gap: 2px; }
+      .watchbar { align-items: flex-start; flex-wrap: wrap; }
+      .watchbar input { flex: 1 1 100%; }
+      .detail-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -328,7 +487,11 @@ HTML_TEMPLATE = r"""<!doctype html>
         </div>
       </div>
       <nav class="tabs" id="tabs" aria-label="简报视图">__TABS__</nav>
-      <div class="snapshot"><strong id="snapshotTime">__SNAPSHOT_TIME__</strong>单文件快照</div>
+      <div class="snapshot">
+        <strong id="snapshotTime">__SNAPSHOT_TIME__</strong>
+        单文件快照
+        <span class="refresh-state" id="refreshState">15 分钟后检查更新</span>
+      </div>
     </div>
 
     <section class="hero">
@@ -361,16 +524,61 @@ HTML_TEMPLATE = r"""<!doctype html>
         <span><i class="dot" style="background:#dba644"></i>热榜线索</span>
       </div>
     </section>
+    <section class="watchbar">
+      <strong>我的关注</strong>
+      <input id="watchInput" type="text" placeholder="输入关键词，例如：航天、人工智能、天气" autocomplete="off">
+      <button id="watchAdd" type="button">添加关注</button>
+      <div class="chips" id="watchChips"></div>
+    </section>
 
     <div id="content">__INITIAL_CONTENT__</div>
-    <p class="foot">公开新闻 RSS 与热榜线索聚合 · 评分表示检索优先级，不代表事实真实性概率 · 信息以原文及后续通报为准</p>
+    <p class="foot">
+      公开新闻 RSS 与热榜线索聚合 · 评分表示检索优先级，不代表事实真实性概率 · 信息以原文及后续通报为准
+      <br><a href="./digest.xml">订阅每日摘要</a> · <a href="./digest.md">Markdown 日报</a>
+    </p>
   </main>
+
+  <dialog id="eventDialog">
+    <div class="dialog-head">
+      <h2 id="dialogTitle">事件详情</h2>
+      <div class="dialog-actions">
+        <button id="shareEvent" type="button">复制链接</button>
+        <button id="closeDialog" type="button">关闭</button>
+      </div>
+    </div>
+    <div class="dialog-body" id="dialogBody"></div>
+  </dialog>
 
   <div class="toast" id="toast">已切换视图</div>
   <script>
     const REPORTS = __REPORTS__;
-    let active = 0;
+    const WATCH_KEY = "cn-news-watchlist-v1";
+    const READ_KEY = "cn-news-read-v1";
+    const NOTIFY_KEY = "cn-news-notified-v1";
+    const AUTO_REFRESH_MS = 15 * 60 * 1000;
+    const params = new URLSearchParams(location.search);
+    const requestedView = params.get("view");
+    const requestedEvent = params.get("event");
+    let active = Math.max(0, REPORTS.findIndex((report) => report.id === requestedView));
     let query = "";
+    let currentEvents = [];
+    let sharedEvent = null;
+    let watchlist = readStore(WATCH_KEY, []);
+    let readIds = new Set(readStore(READ_KEY, []));
+    let notifiedIds = new Set(readStore(NOTIFY_KEY, []));
+
+    function readStore(key, fallback) {
+      try {
+        const value = JSON.parse(localStorage.getItem(key) || "null");
+        return value ?? fallback;
+      } catch (_) {
+        return fallback;
+      }
+    }
+
+    function writeStore(key, value) {
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
+    }
 
     const esc = (value) => String(value ?? "")
       .replaceAll("&", "&amp;")
@@ -383,6 +591,12 @@ HTML_TEMPLATE = r"""<!doctype html>
       if ((status || "").includes("多方")) return "verified";
       if ((status || "").includes("热榜")) return "clue";
       return "single";
+    };
+
+    const changeLabel = (change) => {
+      if (change === "new") return "新事件";
+      if (change === "updated") return "刚刚更新";
+      return "";
     };
 
     const displayTime = (value) => {
@@ -404,16 +618,22 @@ HTML_TEMPLATE = r"""<!doctype html>
       const klass = statusClass(event.status);
       const hot = event.hot_clues?.[0]?.title || "";
       const publishers = event.publishers?.length ? event.publishers.join("、") : "热榜线索";
+      const change = changeLabel(event.change);
+      const official = event.official_publishers?.length ? `<span class="change">官方来源</span>` : "";
       return `
         <article class="event ${klass}">
           <div class="event-top">
             <span class="pill ${klass}">${esc(event.status)}</span>
+            ${change ? `<span class="change ${event.change}">${change}</span>` : ""}
+            ${official}
             <span class="meter">优先级 ${Number(event.score).toFixed(1)} · 置信度 ${event.confidence}</span>
           </div>
-          <div class="event-index">${String(index + 1).padStart(2, "0")}</div>
+          <div class="event-index">${String(index + 1).padStart(2, "0")} · ${readIds.has(event.event_id) ? '<span class="read-badge">已读</span>' : ""}</div>
           <h3>${esc(event.title)}</h3>
           <p>${esc(event.summary || "暂无摘要")}</p>
+          ${event.why_important?.[0] ? `<div class="hot-note">为什么重要：${esc(event.why_important[0])}</div>` : ""}
           ${hot ? `<div class="hot-note">热榜线索：${esc(hot)}</div>` : ""}
+          <button class="open-event" type="button" data-event-id="${esc(event.event_id)}">查看时间线与来源对比 →</button>
           <div class="event-meta">
             <div>${displayTime(event.first_seen)} 至 ${displayTime(event.last_updated)} · ${esc(publishers)}</div>
             <div class="links">${sourceLinks(event)}</div>
@@ -424,7 +644,11 @@ HTML_TEMPLATE = r"""<!doctype html>
     const eventRow = (event, index) => `
       <tr>
         <td>${index + 1}</td>
-        <td><strong>${esc(event.title)}</strong></td>
+        <td>
+          <button class="event-title" type="button" data-event-id="${esc(event.event_id)}">${esc(event.title)}</button>
+          ${event.change === "new" ? '<span class="change new">新事件</span>' : event.change === "updated" ? '<span class="change updated">更新</span>' : ""}
+          ${readIds.has(event.event_id) ? '<span class="read-badge">已读</span>' : ""}
+        </td>
         <td><span class="pill ${statusClass(event.status)}">${esc(event.status)}</span></td>
         <td>${esc(event.publishers?.join("、") || "热榜")}</td>
         <td>${Number(event.score).toFixed(1)}</td>
@@ -438,12 +662,22 @@ HTML_TEMPLATE = r"""<!doctype html>
         <small>${esc(item.summary || "仅作为关注度线索，尚无匹配新闻 RSS 报道。")}</small>
       </li>`).join("") : `<li><span>当前视图没有独立热榜线索。</span></li>`;
 
-    const sourceRows = (items) => items.map((source) => `
+    const sourceHistory = (source, history) => {
+      const dots = history.slice(-12).map((run) => {
+        const row = (run.sources || []).find((item) => item.name === source.name);
+        const state = !row ? "" : row.ok ? "ok" : "fail";
+        return `<i class="health-dot ${state}" title="${esc(run.generated_at || "")}"></i>`;
+      }).join("");
+      return dots ? `<div class="health-strip">${dots}</div>` : "";
+    };
+
+    const sourceRows = (items, history = []) => items.map((source) => `
       <li>
         <span class="${source.ok ? "ok" : "fail"}">${source.ok ? "正常" : "失败"}</span>
         <strong>${esc(source.name)}</strong>
         <span>${source.items} 条</span>
         <small>${esc(source.detail || "")}</small>
+        ${sourceHistory(source, history)}
       </li>`).join("");
 
     const matches = (event, needle) => {
@@ -454,6 +688,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         event.status,
         ...(event.publishers || []),
         ...(event.hot_clues || []).map((item) => item.title),
+        ...(event.why_important || []),
       ].join(" ").toLowerCase();
       return haystack.includes(needle);
     };
@@ -463,13 +698,103 @@ HTML_TEMPLATE = r"""<!doctype html>
       return `${item.title} ${item.summary} ${item.source}`.toLowerCase().includes(needle);
     };
 
+    const watchMatches = (events) => {
+      if (!watchlist.length) return [];
+      return events.filter((event) => watchlist.some((word) =>
+        `${event.title} ${event.summary}`.toLowerCase().includes(word.toLowerCase())
+      ));
+    };
+
+    const maybeNotify = (events) => {
+      if (!("Notification" in window) || Notification.permission !== "granted") return;
+      const fresh = events
+        .filter((event) => ["new", "updated"].includes(event.change) && !notifiedIds.has(event.event_id))
+        .slice(0, 3);
+      fresh.forEach((event) => {
+        try {
+          new Notification("关注事件更新", {
+            body: event.title,
+            icon: "./icon-192.png",
+            tag: event.event_id,
+          });
+          notifiedIds.add(event.event_id);
+        } catch (_) {}
+      });
+      if (fresh.length) writeStore(NOTIFY_KEY, [...notifiedIds].slice(-500));
+    };
+
+    function renderWatch() {
+      const chips = document.getElementById("watchChips");
+      chips.innerHTML = watchlist.map((word, index) => `
+        <span class="chip">${esc(word)}<button type="button" data-watch-remove="${index}" aria-label="移除${esc(word)}">×</button></span>
+      `).join("");
+      chips.querySelectorAll("[data-watch-remove]").forEach((button) => {
+        button.addEventListener("click", () => {
+          watchlist.splice(Number(button.dataset.watchRemove), 1);
+          writeStore(WATCH_KEY, watchlist);
+          renderWatch();
+          render();
+        });
+      });
+    }
+
+    const openEvent = (event) => {
+      if (!event) return;
+      sharedEvent = event;
+      readIds.add(event.event_id);
+      writeStore(READ_KEY, [...readIds]);
+      document.getElementById("dialogTitle").textContent = event.title;
+      const klass = statusClass(event.status);
+      const reasons = (event.why_important || []).map((reason) => `<span class="reason">${esc(reason)}</span>`).join("");
+      const timeline = (event.timeline || []).map((item) => `
+        <li class="${item.tier}">
+          <time>${displayTime(item.time)} · ${esc(item.publisher || item.source)}</time>
+          ${item.url ? `<a href="${esc(item.url)}" target="_blank" rel="noopener">${esc(item.title)}</a>` : `<span>${esc(item.title)}</span>`}
+        </li>`).join("");
+      const hot = (event.hot_clues || []).map((item) =>
+        `${esc(item.source)} #${item.rank} ${esc(item.title)}`
+      ).join("<br>") || "暂无匹配热榜线索";
+      const previous = event.previous ? `
+        <div class="detail-box" style="margin-top:16px">
+          <h3>上次记录</h3>
+          <p>最近更新：${displayTime(event.previous.last_updated)}<br>当时状态：${esc(event.previous.status || "未知")}<br>当时优先级：${Number(event.previous.score || 0).toFixed(1)}</p>
+        </div>` : "";
+      document.getElementById("dialogBody").innerHTML = `
+        <div class="event-top">
+          <span class="pill ${klass}">${esc(event.status)}</span>
+          <span class="meter">优先级 ${Number(event.score).toFixed(1)} · 置信度 ${event.confidence}</span>
+        </div>
+        <p>${esc(event.summary || "暂无摘要")}</p>
+        <div class="reason-list">${reasons}</div>
+        <div class="detail-grid">
+          <div class="detail-box">
+            <h3>发生了什么</h3>
+            <p>首次出现：${displayTime(event.first_seen)}<br>最近更新：${displayTime(event.last_updated)}<br>新闻来源：${esc(event.publishers?.join("、") || "暂无")} </p>
+          </div>
+          <div class="detail-box">
+            <h3>核实状态</h3>
+            <p>${esc(event.status)}，共 ${event.publishers?.length || 0} 个新闻出版方。<br>官方直源：${esc(event.official_publishers?.join("、") || "暂无")} </p>
+          </div>
+        </div>
+        <div class="section-head"><h2 style="font-size:16px">事件时间线</h2><p>同一事件按来源发布时间排列</p></div>
+        <ul class="timeline">${timeline || "<li>暂无详细时间线。</li>"}</ul>
+        <div class="detail-box" style="margin-top:16px"><h3>热榜线索</h3><p>${hot}</p></div>
+        ${previous}`;
+      document.getElementById("eventDialog").showModal();
+      history.replaceState(null, "", `?view=${REPORTS[active].id}&event=${encodeURIComponent(event.event_id)}`);
+      render();
+    };
+
     const render = () => {
       const report = REPORTS[active];
       const payload = report.payload;
       const meta = payload.meta;
       const needle = query.trim().toLowerCase();
+      currentEvents = payload.events;
       const events = payload.events.filter((event) => matches(event, needle));
       const hot = payload.standalone_hot.filter((item) => matchesHot(item, needle));
+      const watched = watchMatches(events);
+      const healthHistory = meta.health_history || [];
 
       document.querySelectorAll(".tab").forEach((tab, index) => {
         tab.classList.toggle("active", index === active);
@@ -495,8 +820,16 @@ HTML_TEMPLATE = r"""<!doctype html>
             <tbody>${events.map(eventRow).join("")}</tbody>
           </table></div>`
         : `<div class="empty">没有符合当前搜索条件的事件。</div>`;
+      const watchHtml = watchlist.length ? `
+        <div class="section-head">
+          <h2>我的关注</h2>
+          <p>${watched.length ? `找到 ${watched.length} 个相关事件` : "当前视图暂无匹配"}</p>
+        </div>
+        ${watched.length ? `<div class="table-wrap"><table><tbody>${watched.slice(0, 8).map(eventRow).join("")}</tbody></table></div>` : '<div class="empty">关注词暂时没有命中新事件。</div>'}
+      ` : "";
 
       document.getElementById("content").innerHTML = `
+        ${watchHtml}
         <div class="section-head">
           <h2>${needle ? "搜索结果" : "当前主线"}</h2>
           <p>${needle ? `匹配 ${events.length} 个事件` : "按时效、来源、独立印证和关注度综合排序"}</p>
@@ -504,7 +837,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         <section class="lead-grid">${leadHtml}</section>
         <div class="section-head">
           <h2>事件列表</h2>
-          <p>当前展示 ${events.length} / ${meta.events_shown} 个事件</p>
+          <p>${meta.events_shown} 个已展示事件 · ${events.length} 个匹配</p>
         </div>
         ${tableHtml}
         <div class="section-head">
@@ -513,8 +846,14 @@ HTML_TEMPLATE = r"""<!doctype html>
         </div>
         <section class="split">
           <div class="panel"><h3>关注词</h3><ul class="hot-list">${hotRows(hot)}</ul></div>
-          <div class="panel"><h3>来源状态</h3><ul class="source-list">${sourceRows(payload.source_status)}</ul></div>
+          <div class="panel"><h3>来源状态 · 最近12次</h3><ul class="source-list">${sourceRows(payload.source_status, healthHistory)}</ul></div>
         </section>`;
+      document.querySelectorAll("[data-event-id]").forEach((button) => {
+        button.addEventListener("click", () => {
+          openEvent(currentEvents.find((item) => item.event_id === button.dataset.eventId));
+        });
+      });
+      maybeNotify(watched);
     };
 
     const tabs = document.getElementById("tabs");
@@ -529,7 +868,9 @@ HTML_TEMPLATE = r"""<!doctype html>
         active = index;
         query = "";
         document.getElementById("searchInput").value = "";
+        history.replaceState(null, "", `?view=${report.id}`);
         render();
+        renderWatch();
         toast(`${report.label} 已加载`);
       });
       tabs.appendChild(button);
@@ -540,16 +881,83 @@ HTML_TEMPLATE = r"""<!doctype html>
       render();
     });
 
+    document.getElementById("watchAdd").addEventListener("click", () => {
+      const input = document.getElementById("watchInput");
+      const value = input.value.trim();
+      if (value && !watchlist.includes(value)) {
+        watchlist.push(value);
+        watchlist = watchlist.slice(-20);
+        writeStore(WATCH_KEY, watchlist);
+        input.value = "";
+        renderWatch();
+        render();
+        toast(`已关注“${value}”`);
+        if ("Notification" in window && Notification.permission === "default") {
+          Notification.requestPermission().catch(() => {});
+        }
+      }
+    });
+    document.getElementById("watchInput").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") document.getElementById("watchAdd").click();
+    });
+
+    document.getElementById("closeDialog").addEventListener("click", () => {
+      document.getElementById("eventDialog").close();
+      history.replaceState(null, "", `?view=${REPORTS[active].id}`);
+    });
+    document.getElementById("eventDialog").addEventListener("click", (event) => {
+      if (event.target === event.currentTarget) {
+        event.currentTarget.close();
+      }
+    });
+    document.getElementById("shareEvent").addEventListener("click", async () => {
+      const url = new URL(location.href);
+      url.searchParams.set("view", REPORTS[active].id);
+      if (sharedEvent) url.searchParams.set("event", sharedEvent.event_id);
+      try {
+        await navigator.clipboard.writeText(url.toString());
+        toast("事件链接已复制");
+      } catch (_) {
+        toast(url.toString());
+      }
+    });
+
     let toastTimer;
     const toast = (message) => {
       const node = document.getElementById("toast");
       node.textContent = message;
       node.classList.add("show");
       clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => node.classList.remove("show"), 1300);
+      toastTimer = setTimeout(() => node.classList.remove("show"), 1800);
     };
 
+    const refreshAt = Date.now() + AUTO_REFRESH_MS;
+    const updateRefresh = () => {
+      if (document.hidden) return;
+      const left = Math.max(0, refreshAt - Date.now());
+      const minutes = Math.ceil(left / 60000);
+      document.getElementById("refreshState").textContent = minutes
+        ? `${minutes} 分钟后检查更新`
+        : "正在检查更新";
+    };
+    setInterval(updateRefresh, 30000);
+    setTimeout(() => location.reload(), AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && Date.now() >= refreshAt) location.reload();
+      updateRefresh();
+    });
+
+    if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+      navigator.serviceWorker.register("./sw.js").catch(() => {});
+    }
+
+    renderWatch();
     render();
+    updateRefresh();
+    if (requestedEvent) {
+      const event = currentEvents.find((item) => item.event_id === requestedEvent);
+      if (event) openEvent(event);
+    }
   </script>
 </body>
 </html>
@@ -612,6 +1020,289 @@ def build_report(
     }
 
 
+def load_state(path: Optional[Path]) -> dict:
+    if not path or not path.exists():
+        return {"events": {}, "health_history": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"events": {}, "health_history": []}
+        data.setdefault("events", {})
+        data.setdefault("health_history", [])
+        return data
+    except (OSError, ValueError, TypeError):
+        return {"events": {}, "health_history": []}
+
+
+def apply_change_tracking(reports: list[dict], state: dict) -> None:
+    stored_events = state.get("events") or {}
+    next_events: dict[str, dict] = {}
+    for report in reports:
+        for event in report["payload"]["events"]:
+            key = f"{report['id']}:{event.get('event_id') or event.get('title')}"
+            previous = stored_events.get(key)
+            if not previous:
+                event["change"] = "new"
+                event["previous"] = None
+            elif (
+                previous.get("last_updated") != event.get("last_updated")
+                or previous.get("status") != event.get("status")
+            ):
+                event["change"] = "updated"
+                event["previous"] = {
+                    "last_updated": previous.get("last_updated"),
+                    "score": previous.get("score"),
+                    "status": previous.get("status"),
+                }
+            else:
+                event["change"] = "unchanged"
+                event["previous"] = None
+            next_events[key] = {
+                "title": event.get("title"),
+                "last_updated": event.get("last_updated"),
+                "score": event.get("score"),
+                "status": event.get("status"),
+                "seen_at": report["payload"]["meta"].get("generated_at"),
+            }
+    state["events"] = next_events
+    state["updated_at"] = pulse.iso_time(pulse.now_cn())
+
+
+def append_health_history(
+    state: dict,
+    statuses: list[pulse.SourceStatus],
+    generated_at: datetime,
+) -> list[dict]:
+    history = state.get("health_history") or []
+    history.append(
+        {
+            "generated_at": pulse.iso_time(generated_at),
+            "sources": [
+                {
+                    "name": row.name,
+                    "ok": row.ok,
+                    "items": row.items,
+                    "detail": row.detail,
+                }
+                for row in statuses
+            ],
+        }
+    )
+    history = history[-48:]
+    state["health_history"] = history
+    return history
+
+
+def write_state(path: Optional[Path], state: dict) -> None:
+    if not path:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def strip_markdown(value: object) -> str:
+    return pulse.clean_text(value, 1000)
+
+
+def build_digest_markdown(report: dict) -> str:
+    payload = report["payload"]
+    meta = payload["meta"]
+    lines = [
+        f"# 国内时事日报｜{meta['generated_at'][:10]}",
+        "",
+        f"截至 {meta['generated_at']}，最近 {meta['window_hours']} 小时重点事件。",
+        "",
+    ]
+    for index, event in enumerate(payload["events"][:6], 1):
+        lines.append(f"## {index}. {event['title']}")
+        lines.append("")
+        lines.append(strip_markdown(event.get("summary")))
+        lines.append("")
+        if event.get("why_important"):
+            lines.append("为什么重要：" + "；".join(event["why_important"]) + "。")
+            lines.append("")
+        for source in event.get("sources", [])[:2]:
+            if source.get("url"):
+                lines.append(f"- [{source['name']}]({source['url']})")
+        lines.append("")
+    lines.append("热榜与热搜仅作为关注度线索，事实以原文和后续通报为准。")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_digest_atom(report: dict, page_url: str) -> str:
+    payload = report["payload"]
+    meta = payload["meta"]
+    updated = meta["generated_at"]
+    entries = []
+    for event in payload["events"][:10]:
+        source_url = next(
+            (source["url"] for source in event.get("sources", []) if source.get("url")),
+            page_url,
+        )
+        entries.append(
+            f"""<entry>
+  <title>{esc(event.get("title"))}</title>
+  <link href="{esc(source_url)}"/>
+  <id>urn:cn-news-pulse:{esc(event.get("event_id"))}</id>
+  <updated>{esc(event.get("last_updated") or updated)}</updated>
+  <summary>{esc(event.get("summary"))}</summary>
+</entry>"""
+        )
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>国内时事日报</title>
+  <id>{esc(page_url)}</id>
+  <link href="{esc(page_url)}"/>
+  <updated>{esc(updated)}</updated>
+  <author><name>CN News Pulse</name></author>
+  {"".join(entries)}
+</feed>
+"""
+
+
+PWA_ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="120" fill="#e55353"/>
+  <path d="M142 126h228v260H142z" fill="#fff8f5"/>
+  <path d="M185 180h142M185 232h142M185 284h95" stroke="#17233d" stroke-width="25" stroke-linecap="round"/>
+  <circle cx="337" cy="337" r="78" fill="#17233d"/>
+  <path d="M337 295v42l28 18" fill="none" stroke="#ffffff" stroke-width="16" stroke-linecap="round"/>
+</svg>
+"""
+
+
+def make_pwa_png(size: int) -> bytes:
+    red = (229, 83, 83, 255)
+    white = (255, 248, 245, 255)
+    navy = (23, 35, 61, 255)
+    transparent = (255, 255, 255, 0)
+    pixels = bytearray()
+    for y in range(size):
+        pixels.append(0)
+        for x in range(size):
+            nx = x / max(1, size - 1)
+            ny = y / max(1, size - 1)
+            color = red
+            if 0.18 <= nx <= 0.82 and 0.18 <= ny <= 0.82:
+                color = white
+            if 0.31 <= ny <= 0.35 and 0.30 <= nx <= 0.70:
+                color = navy
+            if 0.44 <= ny <= 0.48 and 0.30 <= nx <= 0.70:
+                color = navy
+            if 0.57 <= ny <= 0.61 and 0.30 <= nx <= 0.55:
+                color = navy
+            cx, cy, radius = 0.67, 0.66, 0.15
+            if (nx - cx) ** 2 + (ny - cy) ** 2 <= radius ** 2:
+                color = navy
+            if (nx - cx) ** 2 + (ny - cy) ** 2 <= 0.105 ** 2:
+                color = white
+            if color == white and (
+                (abs(nx - cx) <= 0.018 and cy - 0.01 <= ny <= cy)
+                or (abs(ny - cy) <= 0.018 and cx <= nx <= cx + 0.075)
+            ):
+                color = navy
+            if (nx < 0.10 or nx > 0.90 or ny < 0.10 or ny > 0.90):
+                color = transparent
+            pixels.extend(color)
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(payload))
+            + kind
+            + payload
+            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+        )
+
+    header = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(bytes(pixels), 9))
+        + chunk(b"IEND", b"")
+    )
+
+
+def write_sidecars(
+    output: Path,
+    report: dict,
+    generated_at: datetime,
+    page_url: str,
+) -> None:
+    directory = output.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "name": "国内时事简报",
+        "short_name": "国内时事",
+        "description": "聚合国内公开新闻、事件时间线和热榜线索。",
+        "start_url": "./",
+        "scope": "./",
+        "display": "standalone",
+        "background_color": "#f2f5f9",
+        "theme_color": "#17233d",
+        "lang": "zh-CN",
+        "icons": [
+            {
+                "src": "icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+            {
+                "src": "icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable",
+            }
+        ],
+    }
+    (directory / "manifest.webmanifest").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (directory / "icon.svg").write_text(PWA_ICON, encoding="utf-8")
+    (directory / "icon-192.png").write_bytes(make_pwa_png(192))
+    (directory / "icon-512.png").write_bytes(make_pwa_png(512))
+    version = generated_at.strftime("%Y%m%d%H%M")
+    service_worker = f"""const CACHE_NAME = "cn-news-pulse-{version}";
+const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg", "./icon-192.png"];
+self.addEventListener("install", (event) => {{
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)));
+  self.skipWaiting();
+}});
+self.addEventListener("activate", (event) => {{
+  event.waitUntil(
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key)))
+    )
+  );
+  self.clients.claim();
+}});
+self.addEventListener("fetch", (event) => {{
+  if (event.request.mode === "navigate") {{
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {{
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put("./index.html", copy));
+          return response;
+        }})
+        .catch(() => caches.match("./index.html"))
+    );
+  }}
+}});
+"""
+    (directory / "sw.js").write_text(service_worker, encoding="utf-8")
+    digest = build_digest_markdown(report)
+    (directory / "digest.md").write_text(digest, encoding="utf-8")
+    (directory / "digest.xml").write_text(
+        build_digest_atom(report, page_url),
+        encoding="utf-8",
+    )
+
+
 def esc(value: object) -> str:
     return html.escape(str(value or ""), quote=True)
 
@@ -651,15 +1342,29 @@ def render_event_card(event: dict, index: int) -> str:
     publishers = "、".join(event.get("publishers") or []) or "热榜线索"
     hot_clues = event.get("hot_clues") or []
     hot = f'<div class="hot-note">热榜线索：{esc(hot_clues[0].get("title"))}</div>' if hot_clues else ""
+    why = event.get("why_important") or []
+    why_html = f'<div class="hot-note">为什么重要：{esc(why[0])}</div>' if why else ""
+    change = event.get("change")
+    change_html = (
+        '<span class="change new">新事件</span>'
+        if change == "new"
+        else '<span class="change updated">刚刚更新</span>'
+        if change == "updated"
+        else ""
+    )
+    official_html = '<span class="change">官方来源</span>' if event.get("official_publishers") else ""
     return f"""
       <article class="event {klass}">
         <div class="event-top">
           <span class="pill {klass}">{esc(event.get("status"))}</span>
+          {change_html}
+          {official_html}
           <span class="meter">优先级 {float(event.get("score") or 0):.1f} · 置信度 {int(event.get("confidence") or 0)}</span>
         </div>
         <div class="event-index">{index + 1:02d}</div>
         <h3>{esc(event.get("title"))}</h3>
         <p>{esc(event.get("summary") or "暂无摘要")}</p>
+        {why_html}
         {hot}
         <div class="event-meta">
           <div>{display_time(event.get("first_seen"))} 至 {display_time(event.get("last_updated"))} · {esc(publishers)}</div>
@@ -774,12 +1479,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="生成可离线打开的三视图国内时事页面。")
     parser.add_argument("--output", default="cn-news-dashboard.html", help="HTML输出路径")
     parser.add_argument("--timeout", type=int, default=pulse.DEFAULT_TIMEOUT, help="单请求超时秒数")
+    parser.add_argument("--cache-dir", help="保存跨运行事件状态和来源健康历史的目录")
+    parser.add_argument("--site-url", default="https://guoweibo2013.github.io/cn-news-page/", help="公开主页地址")
+    parser.add_argument("--fail-if-empty", action="store_true", help="没有任何新闻或事件时以失败退出，保留上一版页面")
+    parser.add_argument("--no-site-news", action="store_true", help="不抓取政府和新华网首页要闻")
     args = parser.parse_args()
 
     generated_at = pulse.now_cn()
     max_hours = max(preset["hours"] for preset in PRESETS)
     cutoff = generated_at - timedelta(hours=max_hours)
     news_items, news_status = pulse.load_feeds([], args.timeout, cutoff, 200)
+    if not args.no_site_news:
+        site_items, site_status = pulse.load_site_news(
+            args.timeout,
+            cutoff,
+            max_items_per_site=10,
+        )
+        news_items.extend(site_items)
+        news_status.extend(site_status)
     hot_clues, hot_status = pulse.load_hot_clues(args.timeout, True, True)
     reports = [
         build_report(
@@ -792,10 +1509,31 @@ def main() -> int:
         )
         for preset in PRESETS
     ]
+    if args.fail_if_empty and (
+        not news_items
+        or not any(report["payload"]["events"] for report in reports)
+    ):
+        sys.stderr.write("refusing to publish an empty dashboard\n")
+        return 2
+
+    cache_dir = Path(args.cache_dir).expanduser().resolve() if args.cache_dir else None
+    state_path = cache_dir / "dashboard-state.json" if cache_dir else None
+    state = load_state(state_path)
+    health_history = append_health_history(
+        state,
+        news_status + hot_status,
+        generated_at,
+    )
+    apply_change_tracking(reports, state)
+    for report in reports:
+        report["payload"]["meta"]["health_history"] = health_history
+
     output = build_page(reports, generated_at)
     target = Path(args.output).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(output, encoding="utf-8")
+    write_sidecars(target, reports[0], generated_at, args.site_url)
+    write_state(state_path, state)
     failed = [row.name for row in news_status + hot_status if not row.ok]
     if failed:
         sys.stderr.write("degraded sources: " + ", ".join(failed) + "\n")
