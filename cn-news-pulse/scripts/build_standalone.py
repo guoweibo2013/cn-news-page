@@ -332,6 +332,8 @@ HTML_TEMPLATE = r"""<!doctype html>
       cursor: pointer;
     }
     button.event-title:hover { color: var(--blue); }
+    .row-summary { display: none; }
+    .row-badges { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-left: 7px; }
     .watchbar {
       display: flex;
       align-items: center;
@@ -475,6 +477,59 @@ HTML_TEMPLATE = r"""<!doctype html>
       .watchbar { align-items: flex-start; flex-wrap: wrap; }
       .watchbar input { flex: 1 1 100%; }
       .detail-grid { grid-template-columns: 1fr; }
+      .table-wrap {
+        overflow: visible;
+        border: 0;
+        background: transparent;
+        box-shadow: none;
+      }
+      .table-wrap table,
+      .table-wrap tbody {
+        display: block;
+      }
+      .table-wrap thead {
+        display: none;
+      }
+      .table-wrap tbody {
+        display: grid;
+        gap: 12px;
+      }
+      .table-wrap tr {
+        display: block;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: white;
+        box-shadow: var(--shadow);
+      }
+      .table-wrap td {
+        display: none;
+        padding: 0;
+        border: 0;
+      }
+      .table-wrap td:nth-child(2) {
+        display: block;
+      }
+      .table-wrap .event-title {
+        display: block;
+        width: 100%;
+        font-size: 18px;
+        line-height: 1.52;
+      }
+      .table-wrap .row-badges {
+        display: none;
+      }
+      .table-wrap .row-summary {
+        display: -webkit-box;
+        margin-top: 9px;
+        overflow: hidden;
+        color: #536078;
+        font-size: 15px;
+        font-weight: 400;
+        line-height: 1.68;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+      }
     }
   </style>
 </head>
@@ -648,8 +703,11 @@ HTML_TEMPLATE = r"""<!doctype html>
         <td>${index + 1}</td>
         <td>
           <button class="event-title" type="button" data-event-id="${esc(event.event_id)}">${esc(event.title)}</button>
-          ${event.change === "new" ? '<span class="change new">新事件</span>' : event.change === "updated" ? '<span class="change updated">更新</span>' : ""}
-          ${readIds.has(event.event_id) ? '<span class="read-badge">已读</span>' : ""}
+          <span class="row-badges">
+            ${event.change === "new" ? '<span class="change new">新事件</span>' : event.change === "updated" ? '<span class="change updated">更新</span>' : ""}
+            ${readIds.has(event.event_id) ? '<span class="read-badge">已读</span>' : ""}
+          </span>
+          <span class="row-summary">${esc(event.summary || "")}</span>
         </td>
         <td><span class="pill ${statusClass(event.status)}">${esc(event.status)}</span></td>
         <td>${esc(event.publishers?.join("、") || "热榜")}</td>
@@ -1380,7 +1438,10 @@ def render_event_row(event: dict, index: int) -> str:
     return f"""
       <tr>
         <td>{index + 1}</td>
-        <td><strong>{esc(event.get("title"))}</strong></td>
+        <td>
+          <strong class="event-title">{esc(event.get("title"))}</strong>
+          <span class="row-summary">{esc(event.get("summary") or "")}</span>
+        </td>
         <td><span class="pill {klass}">{esc(event.get("status"))}</span></td>
         <td>{esc("、".join(event.get("publishers") or []) or "热榜")}</td>
         <td>{float(event.get("score") or 0):.1f}</td>
