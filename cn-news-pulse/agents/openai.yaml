@@ -1,0 +1,8 @@
+interface:
+  display_name: "国内时事简报"
+  short_description: "聚合国内公开新闻与热榜线索，按事件去重、核实并生成简报"
+  brand_color: "#E55353"
+  default_prompt: "用 $cn-news-pulse 整理最近 24 小时的重要国内时事，并标注来源与不确定性。"
+
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,54 @@
+---
+name: cn-news-pulse
+description: 汇总国内公开新闻与热榜线索，按事件去重、核实并生成带来源的时事简报；适用于今日新闻、事件追踪和国内热点核查，不用于代替人工事实核查。
+---
+
+# 国内时事简报
+
+使用随附脚本聚合公开新闻 RSS、百度热搜和B站热榜，输出事件级简报。脚本负责抓取、去重、聚类、排序和渲染；你负责检查输出、解释不确定性，并在需要时补充网页核验。
+
+## 基本流程
+
+1. 确定时间窗口。用户没有指定时默认最近24小时；常见窗口为6、24、72小时或7天。
+2. 执行：
+
+```bash
+python3 "$SKILL_DIR/scripts/news_pulse.py" --hours 24 --limit 12 --emit markdown
+```
+
+3. 用户给出主题、人物或产品名时，把主题作为第一个位置参数：
+
+```bash
+python3 "$SKILL_DIR/scripts/news_pulse.py" "神舟二十四号" --hours 72 --emit markdown
+```
+
+4. 需要机器可读结果时使用 `--emit json`。需要可浏览的独立页面时使用 `--emit html --output /absolute/path/brief.html`。
+5. 原样保留新闻链接、发布时间、来源状态和不确定性提示。不要补写脚本没有返回的事实、引语、数字或链接。
+
+需要把“今日要闻、神舟二十四号、6小时科技”合成一个可离线打开、可切换和搜索的页面时：
+
+```bash
+python3 "$SKILL_DIR/scripts/build_standalone.py" --output /absolute/path/cn-news-dashboard.html
+```
+
+该页面是生成时的数据快照；重新执行命令即可更新。
+
+用户要求科技、财经、时政等分类新闻时，使用 `--category`，不要把“科技”等分类词简单当作关键词：
+
+```bash
+python3 "$SKILL_DIR/scripts/news_pulse.py" --category tech --hours 6 --emit markdown
+```
+
+## 输出原则
+
+- 新闻RSS是事实候选来源；百度热搜和B站热榜只是注意力线索，不能单独证明事件属实。
+- “单源报道”不是假新闻的同义词，但应明确提示尚缺独立印证。
+- 时效、来源等级、独立来源数量、热榜关注度共同决定排序；点赞和热搜不能压过来源质量。
+- 突发事件应写明首次出现时间、最近更新时间以及仍未确认的部分。
+- 如果脚本报告某个来源失败，保留简报并说明覆盖不完整。
+- 用户要求“核实真假”时，先用本Skill找出原始报道，再使用当前会话可用的网页搜索核对官方通报或其他独立来源；不得仅凭热榜下结论。
+
+## 参考
+
+- 需要调整来源、评分或判断规则时，读取 [references/editorial-rules.md](references/editorial-rules.md)。
+- 需要增加新的新闻RSS时，优先通过脚本的 `--rss "名称=URL"` 参数验证，再考虑写入默认源列表。
