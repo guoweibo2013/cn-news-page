@@ -608,7 +608,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     <div class="dialog-head">
       <h2 id="dialogTitle">事件详情</h2>
       <div class="dialog-actions">
-        <button id="shareEvent" type="button">复制链接</button>
+        <button id="shareEvent" type="button">打开事件页面</button>
         <button id="closeDialog" type="button">关闭</button>
       </div>
     </div>
@@ -980,16 +980,12 @@ HTML_TEMPLATE = r"""<!doctype html>
         event.currentTarget.close();
       }
     });
-    document.getElementById("shareEvent").addEventListener("click", async () => {
+    document.getElementById("shareEvent").addEventListener("click", () => {
       const url = new URL(location.href);
       url.searchParams.set("view", REPORTS[active].id);
       if (sharedEvent) url.searchParams.set("event", sharedEvent.event_id);
-      try {
-        await navigator.clipboard.writeText(url.toString());
-        toast("事件链接已复制");
-      } catch (_) {
-        toast(url.toString());
-      }
+      if (url.toString() === location.href) location.reload();
+      else location.assign(url.toString());
     });
 
     let toastTimer;
