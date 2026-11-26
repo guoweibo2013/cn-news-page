@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import gzip
 import hashlib
 import html
 import json
@@ -15,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
+import zlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
@@ -262,11 +264,21 @@ def parse_datetime(value: str) -> Optional[datetime]:
         text,
     )
     try:
-        dt = parsedate_to_datetime(text)
-    except (TypeError, ValueError, OverflowError):
+        dt = datetime.fromisoformat(text)
+    except ValueError:
         dt = None
     if dt is None:
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S"):
+        try:
+            dt = parsedate_to_datetime(text)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    if dt is None:
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
+            "%Y/%m/%d %H:%M:%S",
+        ):
             try:
                 dt = datetime.strptime(text, fmt)
                 break
@@ -297,6 +309,7 @@ def fetch_bytes(
         "Accept": "application/rss+xml, application/atom+xml, application/xml, "
         "text/xml, application/json, text/html;q=0.8, */*;q=0.5",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.4",
+        "Accept-Encoding": "identity",
     }
     if extra_headers:
         headers.update(extra_headers)
@@ -306,7 +319,16 @@ def fetch_bytes(
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         content_type = response.headers.get("Content-Type", "")
-        return response.read(3_000_000), content_type
+        content_encoding = (response.headers.get("Content-Encoding") or "").lower()
+        data = response.read(3_000_000)
+        try:
+            if "gzip" in content_encoding:
+                data = gzip.decompress(data)
+            elif "deflate" in content_encoding:
+                data = zlib.decompress(data)
+        except (OSError, EOFError, zlib.error):
+            pass
+        return data, content_type
 
 
 def decode_response(data: bytes, content_type: str) -> str:
@@ -627,7 +649,11 @@ def load_feeds(
 def meta_value(markup: str, name: str) -> str:
     wanted = name.lower()
     for tag in re.findall(r"<meta\b[^>]*>", markup, re.I):
-        name_match = re.search(r"""name\s*=\s*["']([^"']+)["']""", tag, re.I)
+        name_match = re.search(
+            r"""(?:name|property)\s*=\s*["']([^"']+)["']""",
+            tag,
+            re.I,
+        )
         if not name_match or name_match.group(1).lower() != wanted:
             continue
         content_match = re.search(r"""content\s*=\s*["']([^"']*)["']""", tag, re.I)
@@ -807,6 +833,256 @@ def load_site_news(
     return items, statuses
 
 
+def extract_anchor_links(
+    homepage: str,
+    base_url: str,
+    limit: int,
+    mode: str,
+) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for attrs, inner in re.findall(r"<a\b([^>]*)>(.*?)</a>", homepage, re.I | re.S):
+        href_match = re.search(r"""href\s*=\s*["']([^"']+)["']""", attrs, re.I)
+        if not href_match:
+            continue
+        url = urljoin(base_url, html.unescape(href_match.group(1)))
+        title_match = re.search(r"""title\s*=\s*["']([^"']+)["']""", attrs, re.I)
+        title = clean_text(
+            title_match.group(1) if title_match else inner,
+            220,
+        )
+        if not title or len(title) < 6 or url in seen:
+            continue
+        if mode == "people":
+            allowed = re.search(
+                r"^https?://opinion\.people\.com\.cn/n1/\d{4}/\d{4}/[^/]+\.html",
+                url,
+            )
+        elif mode == "guangming":
+            allowed = (
+                "guancha.gmw.cn/" in url
+                and re.search(r"/\d{4}-\d{2}/\d{2}/content_\d+\.htm$", url)
+            )
+        elif mode == "bjnews":
+            allowed = (
+                "bjnews.com.cn/detail/" in url
+                and any(term in title for term in ("快评", "社论", "专栏", "评论"))
+            )
+        else:
+            allowed = False
+        if not allowed:
+            continue
+        seen.add(url)
+        rows.append((url, title))
+    if mode == "people":
+        def link_date_key(row: tuple[str, str]) -> tuple[int, int, int]:
+            match = re.search(r"/n1/(\d{4})/(\d{2})(\d{2})/", row[0])
+            return (
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3)),
+            ) if match else (0, 0, 0)
+        rows.sort(key=link_date_key, reverse=True)
+    elif mode == "guangming":
+        def link_date_key(row: tuple[str, str]) -> tuple[int, int, int]:
+            match = re.search(r"/(\d{4})-(\d{2})/(\d{2})/", row[0])
+            return (
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3)),
+            ) if match else (0, 0, 0)
+        rows.sort(key=link_date_key, reverse=True)
+    return rows[:limit]
+
+
+def commentary_column(title: str) -> str:
+    for term in (
+        "人民锐评",
+        "壹时评",
+        "光明时评",
+        "光明观察",
+        "评论员",
+        "新京报社论",
+        "新京报快评",
+        "新京报专栏",
+        "社论",
+        "快评",
+        "专栏",
+    ):
+        if term in title:
+            return term.replace("新京报", "")
+    return "时评"
+
+
+def fetch_commentary_article(
+    url: str,
+    title_hint: str,
+    source_name: str,
+    publisher: str,
+    authority: float,
+    timeout: int,
+) -> Optional[NewsItem]:
+    try:
+        data, content_type = fetch_bytes(url, timeout)
+        markup = decode_response(data, content_type)
+    except Exception:
+        return None
+
+    title = (
+        clean_text(meta_value(markup, "og:title"), 240)
+        or clean_text(title_hint, 240)
+    )
+    title = re.sub(r"[_\-—|｜]\s*(光明网|新京报).*$", "", title).strip()
+    if not title:
+        return None
+
+    time_text = (
+        meta_value(markup, "article:published_time")
+        or meta_value(markup, "firstpublishedtime")
+        or meta_value(markup, "publishdate")
+    )
+    if not re.search(r"\d{2}:\d{2}", time_text):
+        match = re.search(
+            r"""(?:class\s*=\s*["']timer["'][^>]*>|published_time[^>]*content=["'])(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?)""",
+            markup,
+            re.I,
+        )
+        if match:
+            time_text = match.group(1)
+        else:
+            cn_match = re.search(
+                r"(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{2}):(\d{2})",
+                markup,
+            )
+            if cn_match:
+                year, month, day, hour, minute = map(int, cn_match.groups())
+                time_text = (
+                    f"{year:04d}-{month:02d}-{day:02d} "
+                    f"{hour:02d}:{minute:02d}"
+                )
+    published_at = parse_datetime(time_text)
+
+    summary = clean_text(meta_value(markup, "description"), 700)
+    if not summary or summary.startswith("新京报以文字、图片、视频"):
+        content_match = re.search(
+            r"""id\s*=\s*["']contentStr["'][^>]*>(.*?)(?:</article>|<div\s+class=["'][^"']*share)""",
+            markup,
+            re.I | re.S,
+        )
+        section = content_match.group(1) if content_match else markup
+        summary = first_article_paragraph(section)
+    summary = clean_text(summary, 700)
+    if not summary or summary == title:
+        summary = title
+    if len(summary) > 260:
+        summary = summary[:260].rstrip("，。；、 ") + "…"
+    column = commentary_column(title)
+    if column not in summary[:30]:
+        summary = f"{column}｜{summary}"
+
+    return NewsItem(
+        source_id=fed_id(source_name),
+        source=source_name,
+        publisher=publisher,
+        category="时评",
+        authority=authority,
+        title=title,
+        url=url,
+        summary=summary,
+        published_at=published_at,
+    )
+
+
+def load_commentary_sources(
+    timeout: int,
+    cutoff: datetime,
+    max_items_per_source: int = 8,
+) -> tuple[list[NewsItem], list[SourceStatus]]:
+    sources = (
+        {
+            "name": "人民日报·观点",
+            "publisher": "人民日报",
+            "home": "http://opinion.people.com.cn/",
+            "base": "http://opinion.people.com.cn/",
+            "mode": "people",
+            "authority": 0.96,
+        },
+        {
+            "name": "光明网·时评",
+            "publisher": "光明日报",
+            "home": "https://guancha.gmw.cn/",
+            "base": "https://guancha.gmw.cn/",
+            "mode": "guangming",
+            "authority": 0.94,
+        },
+        {
+            "name": "新京报·评论",
+            "publisher": "新京报",
+            "home": "https://www.bjnews.com.cn/point",
+            "base": "https://www.bjnews.com.cn/",
+            "mode": "bjnews",
+            "authority": 0.82,
+        },
+    )
+    items: list[NewsItem] = []
+    statuses: list[SourceStatus] = []
+    for source in sources:
+        try:
+            data, content_type = fetch_bytes(source["home"], timeout)
+            homepage = decode_response(data, content_type)
+            links = extract_anchor_links(
+                homepage,
+                source["base"],
+                max_items_per_source,
+                source["mode"],
+            )
+            if not links:
+                raise ValueError("no commentary article links found")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [
+                    executor.submit(
+                        fetch_commentary_article,
+                        url,
+                        title,
+                        source["name"],
+                        source["publisher"],
+                        source["authority"],
+                        timeout,
+                    )
+                    for url, title in links
+                ]
+                fetched = [future.result() for future in futures]
+            parsed = [
+                item
+                for item in fetched
+                if item is not None
+                and (item.published_at is None or item.published_at >= cutoff)
+            ]
+            items.extend(parsed)
+            statuses.append(
+                SourceStatus(
+                    source["name"],
+                    "commentary",
+                    bool(parsed),
+                    len(parsed),
+                    "时评栏目解析正常" if parsed else "时评不在时间窗口内",
+                    source["home"],
+                )
+            )
+        except Exception as exc:
+            statuses.append(
+                SourceStatus(
+                    source["name"],
+                    "commentary",
+                    False,
+                    0,
+                    f"{type(exc).__name__}: {exc}",
+                    source["home"],
+                )
+            )
+    return items, statuses
+
+
 def load_hot_clues(
     timeout: int,
     include_baidu: bool,
@@ -873,6 +1149,10 @@ def load_hot_clues(
 
 def matches_category(item: NewsItem, category: str) -> bool:
     wanted = category.strip().lower()
+    if item.category == "时评":
+        return wanted in {"commentary", "opinion", "commentary_all"}
+    if wanted in {"commentary", "opinion", "commentary_all"}:
+        return False
     if not wanted or wanted == "all":
         return True
     if wanted == "tech":
@@ -885,12 +1165,16 @@ def matches_category(item: NewsItem, category: str) -> bool:
         "international": "国际",
         "society": "社会",
         "culture": "文化",
+        "commentary": "报刊时评",
+        "opinion": "报刊时评",
     }
     return item.category == category_aliases.get(wanted, category)
 
 
 def hot_matches_category(clue: HotClue, category: str) -> bool:
     wanted = category.strip().lower()
+    if wanted in {"commentary", "opinion", "commentary_all"}:
+        return False
     if not wanted or wanted == "all":
         return True
     if wanted == "tech":
@@ -1056,6 +1340,8 @@ def event_why_important(event: Event) -> list[str]:
     publishers = {item.publisher for item in event.items}
     official_count = len({item.publisher for item in event.items if item.authority >= 0.90})
     reasons: list[str] = []
+    if event.items and all(item.category == "时评" for item in event.items):
+        reasons.append("主流报刊评论，适合作为观点和论证参考")
     if official_count:
         reasons.append("已有政府网站或中央媒体直接来源")
     if len(publishers) >= 2:
@@ -1084,7 +1370,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--category",
         default="all",
-        choices=("all", "tech", "policy", "finance", "world", "international", "society", "culture"),
+        choices=(
+            "all",
+            "tech",
+            "policy",
+            "finance",
+            "world",
+            "international",
+            "society",
+            "culture",
+            "commentary",
+            "opinion",
+        ),
         help="新闻分类；科技类请使用 tech",
     )
     parser.add_argument("--limit", type=int, default=12, help="输出事件数量，默认12")
@@ -1101,6 +1398,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-baidu", action="store_true", help="不抓取百度热搜")
     parser.add_argument("--no-bilibili", action="store_true", help="不抓取B站热门")
     parser.add_argument("--no-site-news", action="store_true", help="不抓取政府和新华网首页要闻")
+    parser.add_argument("--no-commentary", action="store_true", help="不抓取报刊时评栏目")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="单请求超时秒数")
     parser.add_argument("--max-items-per-feed", type=int, default=100, help="每个RSS最多读取条数")
     parser.add_argument("--self-test", action="store_true", help="运行离线自检")
@@ -1148,6 +1446,12 @@ def event_to_dict(event: Event) -> dict:
         "last_updated": iso_time(event.last_updated),
         "publishers": publishers,
         "official_publishers": official_publishers,
+        "is_commentary": bool(event.items) and all(
+            item.category == "时评" for item in event.items
+        ),
+        "commentary_outlets": sorted(
+            {item.publisher for item in event.items if item.category == "时评"}
+        ),
         "why_important": event_why_important(event),
         "timeline": timeline,
         "sources": [
@@ -1219,6 +1523,8 @@ def render_markdown(payload: dict) -> str:
         "international": "国际",
         "society": "社会",
         "culture": "文化",
+        "commentary": "报刊时评",
+        "opinion": "报刊时评",
     }
     title = "国内时事简报"
     if meta.get("topic"):
@@ -1587,6 +1893,14 @@ def main() -> int:
         )
         news_items.extend(site_items)
         news_status.extend(site_status)
+    if not args.no_commentary:
+        commentary_items, commentary_status = load_commentary_sources(
+            args.timeout,
+            cutoff,
+            max_items_per_source=8,
+        )
+        news_items.extend(commentary_items)
+        news_status.extend(commentary_status)
     hot_clues: list[HotClue] = []
     hot_status: list[SourceStatus] = []
     if not args.no_hot:

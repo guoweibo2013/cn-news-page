@@ -32,6 +32,15 @@ PRESETS = (
         "limit": 12,
     },
     {
+        "id": "commentary",
+        "label": "报刊时评",
+        "description": "人民日报、光明网、新京报等主流报刊评论节选",
+        "hours": 72,
+        "category": "commentary",
+        "topic": "",
+        "limit": 12,
+    },
+    {
         "id": "shenzhou",
         "label": "神舟二十四号",
         "description": "过去 72 小时任务进展与相关报道",
@@ -559,7 +568,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         <div class="hero-meta">
           <span id="windowLabel">__WINDOW_LABEL__</span>
           <span id="generatedLabel">__GENERATED_LABEL__</span>
-          <span>新闻 RSS 与热榜线索分层</span>
+          <span>事实与观点分层</span>
         </div>
       </div>
       <div class="stats">
@@ -855,6 +864,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       const hot = payload.standalone_hot.filter((item) => matchesHot(item, needle));
       const watched = watchMatches(events);
       const healthHistory = meta.health_history || [];
+      const isOpinion = ["commentary", "opinion"].includes(meta.category);
 
       document.querySelectorAll(".tab").forEach((tab, index) => {
         tab.classList.toggle("active", index === active);
@@ -891,7 +901,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       document.getElementById("content").innerHTML = `
         ${watchHtml}
         <div class="section-head">
-          <h2>${needle ? "搜索结果" : "当前主线"}</h2>
+          <h2>${needle ? "搜索结果" : isOpinion ? "报刊评论精选" : "当前主线"}</h2>
           <p>${needle ? `匹配 ${events.length} 个事件` : "按时效、来源、独立印证和关注度综合排序"}</p>
         </div>
         <section class="lead-grid">${leadHtml}</section>
@@ -1050,6 +1060,16 @@ def build_report(
         for item in news_items
         if item.published_at is None or item.published_at >= cutoff
     ]
+    category_news = [
+        item
+        for item in visible_news
+        if pulse.matches_category(item, preset["category"])
+    ]
+    category_hot = [
+        clue
+        for clue in hot_clues
+        if pulse.hot_matches_category(clue, preset["category"])
+    ]
     all_events, standalone_hot = pulse.build_events(
         visible_news,
         hot_clues,
@@ -1067,11 +1087,16 @@ def build_report(
         preset["topic"],
         preset["hours"],
         generated_at,
-        len(visible_news),
-        len(hot_clues),
+        len(category_news),
+        len(category_hot),
         total_events,
         preset["category"],
     )
+    if preset["category"] in {"commentary", "opinion"}:
+        payload["notice"] = (
+            "以下内容为报刊评论和观点节选，仅供阅读与检索参考；"
+            "节选不代表完整原文，请点击来源阅读全文。"
+        )
     return {
         "id": preset["id"],
         "label": preset["label"],
@@ -1560,6 +1585,13 @@ def main() -> int:
         )
         news_items.extend(site_items)
         news_status.extend(site_status)
+    commentary_items, commentary_status = pulse.load_commentary_sources(
+        args.timeout,
+        cutoff,
+        max_items_per_source=8,
+    )
+    news_items.extend(commentary_items)
+    news_status.extend(commentary_status)
     hot_clues, hot_status = pulse.load_hot_clues(args.timeout, True, True)
     reports = [
         build_report(
