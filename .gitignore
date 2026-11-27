@@ -1,0 +1,4 @@
+cn-news-pulse/.cache/
+__pycache__/
+*.pyc
+.DS_Store

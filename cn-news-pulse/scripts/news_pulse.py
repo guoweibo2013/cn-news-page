@@ -974,8 +974,6 @@ def fetch_commentary_article(
     summary = clean_text(summary, 700)
     if not summary or summary == title:
         summary = title
-    if len(summary) > 260:
-        summary = summary[:260].rstrip("，。；、 ") + "…"
     column = commentary_column(title)
     if column not in summary[:30]:
         summary = f"{column}｜{summary}"

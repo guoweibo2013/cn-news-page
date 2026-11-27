@@ -56,6 +56,20 @@ python3 "$SKILL_DIR/scripts/news_pulse.py" --category commentary --hours 72 --em
 python3 "$SKILL_DIR/scripts/news_pulse.py" --category tech --hours 6 --emit markdown
 ```
 
+需要每天生成两张小红书竖版图并写入 iCloud 备忘录时：
+
+```bash
+python3 "$SKILL_DIR/scripts/daily_social_notes.py"
+```
+
+安装每天 07:30 的本机定时任务：
+
+```bash
+python3 "$SKILL_DIR/scripts/daily_social_notes.py" --install-schedule --run-time 07:30
+```
+
+每天生成“今日数字速览”和“今日观点卡”两条备忘录，每条包含 1080×1440 图片和可复制的小红书文案。本机需保持登录、联网，并在 iCloud 备忘录中启用同步。
+
 ## 输出原则
 
 - 新闻RSS是事实候选来源；百度热搜和B站热榜只是注意力线索，不能单独证明事件属实。
