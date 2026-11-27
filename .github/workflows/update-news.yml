@@ -48,6 +48,9 @@ jobs:
             --output dist/index.html \
             --cache-dir .cache \
             --fail-if-empty
+          if [ -d social ]; then
+            cp -R social dist/
+          fi
           test -s dist/index.html
 
       - name: Open daily digest issue
