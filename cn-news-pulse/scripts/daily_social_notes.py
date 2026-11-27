@@ -171,13 +171,6 @@ def first_complete_sentence(value: str, limit: int = 180) -> str:
     return text[:limit].strip()
 
 
-def compact_summary(event: dict, limit: int = 95) -> str:
-    value = pulse.clean_text(event.get("summary") or "", 220)
-    if len(value) > limit:
-        value = value[:limit].rstrip("，。；、 ")
-    return value
-
-
 def source_line(event: dict) -> str:
     publishers = event.get("publishers") or []
     return "来源：" + (" / ".join(publishers[:3]) if publishers else "公开信息")
@@ -195,15 +188,19 @@ def complete_copy_text(value: object) -> str:
     return text.strip()
 
 
-def complete_sentences(value: object) -> str:
+def short_complete_sentence(value: object) -> str:
     text = complete_copy_text(value)
-    parts = re.split(r"(?<=[。！？!?])", text)
-    complete = "".join(
-        part.strip()
-        for part in parts
+    sentences = [
+        part.strip().lstrip("”’」』】）) ")
+        for part in re.split(r"(?<=[。！？!?])", text)
         if part.strip() and re.search(r"[。！？!?]$", part.strip())
-    )
-    return complete.strip() or text
+    ]
+    if not sentences:
+        return text
+    for sentence in sentences:
+        if 18 <= len(sentence) <= 100:
+            return sentence
+    return sentences[0]
 
 
 def build_numbers_svg(
@@ -384,7 +381,8 @@ on run argv
   set noteName to item 1 of argv
   set noteBody to item 2 of argv
   set imagePath to item 3 of argv
-  set imageFile to POSIX file imagePath as alias
+  set imageData to do shell script "/usr/bin/base64 -i " & quoted form of imagePath
+  set htmlBody to noteBody & "<div><img style=\\"max-width:100%;max-height:100%;\\" src=\\"data:image/png;base64," & imageData & "\\"></div>"
   tell application "Notes"
     tell account "iCloud"
       if not (exists folder "时事简报日更") then
@@ -395,10 +393,7 @@ on run argv
       repeat with oldNote in oldNotes
         delete oldNote
       end repeat
-      set newNote to make new note at targetFolder with properties {name:noteName, body:noteBody}
-      tell newNote
-        make new attachment with data imageFile
-      end tell
+      set newNote to make new note at targetFolder with properties {name:noteName, body:htmlBody}
       return id of newNote
     end tell
   end tell
@@ -466,19 +461,21 @@ def numbers_caption(events: list[dict], generated_at: datetime) -> tuple[str, st
     bullet_lines = []
     for event in events[:3]:
         event_title = complete_copy_text(event.get("title"))
-        event_summary = complete_sentences(event.get("summary"))
-        bullet_lines.append(
-            f"• {event_metric(event)}\n"
-            f"标题：{event_title}\n"
-            f"摘要：{event_summary}"
-        )
+        bullet_lines.append(f"• {event_metric(event)}｜{event_title}")
+    source_names = sorted(
+        {
+            publisher
+            for event in events[:3]
+            for publisher in event.get("publishers") or []
+        }
+    )
     bullets = "\n".join(bullet_lines)
     body = (
         f"{title}\n\n"
-        "今天值得记住三个数字：\n"
+        "今天三个数字：\n"
         f"{bullets}\n\n"
-        "数字背后，是基础设施、产业升级和区域连接。\n"
-        "更多来源和时间线见主页。"
+        f"来源：{'、'.join(source_names)}\n"
+        "更多时间线见主页。"
     )
     tags = "#时事热点 #新闻简报 #经济观察 #每天三分钟"
     return title, body, tags
@@ -488,17 +485,21 @@ def opinion_caption(comments: list[dict], generated_at: datetime) -> tuple[str, 
     title = f"{generated_at.month}月{generated_at.day}日观点卡｜今天，听见三种观点"
     lines = []
     for event in comments[:3]:
-        excerpt = complete_sentences(clean_commentary(event))
-        source = " / ".join(event.get("publishers") or [])
-        lines.append(
-            f"•《{complete_copy_text(event.get('title'))}》\n"
-            f"{excerpt}\n来源：{source}"
-        )
+        excerpt = short_complete_sentence(clean_commentary(event))
+        lines.append(f"•《{complete_copy_text(event.get('title'))}》\n{excerpt}")
+    source_names = sorted(
+        {
+            publisher
+            for event in comments[:3]
+            for publisher in event.get("publishers") or []
+        }
+    )
     body = (
         f"{title}\n\n"
-        "今天，主流报刊在讨论什么？\n\n"
+        "今天三种观点：\n"
         + "\n\n".join(lines)
-        + "\n\n评论节选仅供阅读参考，完整内容请阅读原报刊。"
+        + f"\n\n来源：{'、'.join(source_names)}\n"
+        "评论节选仅供阅读参考，完整内容请阅读原报刊。"
     )
     tags = "#今日观点 #媒体评论 #时事观察 #热点解读"
     return title, body, tags
