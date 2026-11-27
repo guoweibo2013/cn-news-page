@@ -119,14 +119,58 @@ def select_number_events(events: list[dict], count: int = 3) -> list[dict]:
             score += 20
         if any(
             term in text
-            for term in ("上市", "售价", "预售", "销量", "个股", "涨幅", "涨停", "彩票")
+            for term in (
+                "上市",
+                "售价",
+                "预售",
+                "销量",
+                "个股",
+                "涨幅",
+                "涨停",
+                "彩票",
+                "汽车",
+                "车型",
+                "停产",
+                "官宣",
+            )
         ):
             score -= 24
+        if "国家统计局" in text or "工信部" in text:
+            score += 12
         if any(term in text for term in ("下降", "同比降", "下滑", "亏损")):
             score -= 8
         ranked.append((score, event))
     ranked.sort(key=lambda item: item[0], reverse=True)
-    return [event for _, event in ranked[:count]] or events[:count]
+    selected: list[dict] = []
+    seen_topics: set[str] = set()
+    for _, event in ranked:
+        text = f"{event.get('title') or ''} {event.get('summary') or ''}"
+        topic = "其他"
+        if any(term in text for term in ("电信", "5G", "基站", "宽带")):
+            topic = "通信"
+        elif any(term in text for term in ("高铁", "铁路", "隧道", "公路", "航运")):
+            topic = "交通"
+        elif any(term in text for term in ("工业企业", "制造业", "工业利润")):
+            topic = "产业"
+        elif any(term in text for term in ("人工智能", "AI", "大模型", "芯片")):
+            topic = "科技"
+        elif any(term in text for term in ("核电", "能源", "电力")):
+            topic = "能源"
+        if topic == "其他":
+            continue
+        if topic in seen_topics:
+            continue
+        selected.append(event)
+        seen_topics.add(topic)
+        if len(selected) >= count:
+            break
+    if len(selected) < count:
+        for _, event in ranked:
+            if event not in selected:
+                selected.append(event)
+            if len(selected) >= count:
+                break
+    return selected or events[:count]
 
 
 def metric_font_size(value: str) -> int:
@@ -201,6 +245,55 @@ def short_complete_sentence(value: object) -> str:
         if 18 <= len(sentence) <= 100:
             return sentence
     return sentences[0]
+
+
+def visible_length(value: str) -> int:
+    return len(re.sub(r"\s+", "", value))
+
+
+def fit_paragraph(parts: list[str], limit: int = 150) -> str:
+    output = ""
+    for part in parts:
+        part = complete_copy_text(part)
+        if not part:
+            continue
+        candidate = output + part
+        if visible_length(candidate) <= limit:
+            output = candidate
+    return output
+
+
+def metric_sentence(event: dict) -> str:
+    metric = event_metric(event)
+    label = short_metric_label(event, metric)
+    if "%" in metric or label.endswith("增长"):
+        return f"{label}{metric}"
+    if "里程" in label:
+        return f"{label}突破{metric}"
+    if "收入" in label or "总数" in label:
+        return f"{label}达到{metric}"
+    return f"{label}为{metric}"
+
+
+def commentary_topic(event: dict) -> str:
+    title = complete_copy_text(event.get("title"))
+    mappings = (
+        ("家校", "家校关系"),
+        ("半天学", "教育评价"),
+        ("学校", "教育治理"),
+        ("体育", "体育消费"),
+        ("招聘", "AI招聘"),
+        ("食品", "食品安全"),
+        ("差评", "平台信用"),
+        ("中欧", "经贸规则"),
+        ("关税", "全球贸易"),
+        ("水资源", "公共治理"),
+    )
+    for keyword, topic in mappings:
+        if keyword in title:
+            return topic
+    value = re.split(r"[，,：:；;]", title)[0].strip("“”\"' ")
+    return value[:10].strip("，。；、 ")
 
 
 def build_numbers_svg(
@@ -362,17 +455,13 @@ def svg_to_png(svg_path: Path, png_path: Path) -> None:
         raise RuntimeError(f"sips failed: {result.stderr or result.stdout}")
 
 
-def note_html(title: str, copy_title: str, body: str, hashtags: str) -> str:
+def note_html(body: str, hashtags: str) -> str:
     paragraphs = "".join(
         f"<p>{esc(line)}</p>" for line in body.splitlines() if line.strip()
     )
     return (
-        f"<h1>{esc(title)}</h1>"
-        f"<p><b>小红书标题：</b>{esc(copy_title)}</p>"
-        f"<p><b>可直接复制文案：</b></p>"
         f"{paragraphs}"
-        f"<p><b>标签：</b>{esc(hashtags)}</p>"
-        f"<p>图片在下方，可在手机上长按保存后发布。</p>"
+        f"<p>{esc(hashtags)}</p>"
     )
 
 
@@ -458,24 +547,12 @@ def load_daily_events(timeout: int) -> tuple[datetime, list[dict], list[dict]]:
 
 def numbers_caption(events: list[dict], generated_at: datetime) -> tuple[str, str, str]:
     title = f"{generated_at.month}月{generated_at.day}日时事速览｜三个数字看懂今天"
-    bullet_lines = []
-    for event in events[:3]:
-        event_title = complete_copy_text(event.get("title"))
-        bullet_lines.append(f"• {event_metric(event)}｜{event_title}")
-    source_names = sorted(
-        {
-            publisher
-            for event in events[:3]
-            for publisher in event.get("publishers") or []
-        }
-    )
-    bullets = "\n".join(bullet_lines)
-    body = (
-        f"{title}\n\n"
-        "今天三个数字：\n"
-        f"{bullets}\n\n"
-        f"来源：{'、'.join(source_names)}\n"
-        "更多时间线见主页。"
+    facts = "，".join(metric_sentence(event) for event in events[:3])
+    body = fit_paragraph(
+        [
+            f"今天三个数字值得关注：{facts}。",
+            "这些数字覆盖交通、产业和通信基础设施，也提示观察经济不能只看规模，还要看效率与需求能否同步改善。",
+        ]
     )
     tags = "#时事热点 #新闻简报 #经济观察 #每天三分钟"
     return title, body, tags
@@ -483,23 +560,14 @@ def numbers_caption(events: list[dict], generated_at: datetime) -> tuple[str, st
 
 def opinion_caption(comments: list[dict], generated_at: datetime) -> tuple[str, str, str]:
     title = f"{generated_at.month}月{generated_at.day}日观点卡｜今天，听见三种观点"
-    lines = []
-    for event in comments[:3]:
-        excerpt = short_complete_sentence(clean_commentary(event))
-        lines.append(f"•《{complete_copy_text(event.get('title'))}》\n{excerpt}")
-    source_names = sorted(
-        {
-            publisher
-            for event in comments[:3]
-            for publisher in event.get("publishers") or []
-        }
-    )
-    body = (
-        f"{title}\n\n"
-        "今天三种观点：\n"
-        + "\n\n".join(lines)
-        + f"\n\n来源：{'、'.join(source_names)}\n"
-        "评论节选仅供阅读参考，完整内容请阅读原报刊。"
+    topics = list(dict.fromkeys(commentary_topic(event) for event in comments[:3]))
+    main_excerpt = short_complete_sentence(clean_commentary(comments[0]))
+    body = fit_paragraph(
+        [
+            f"今天的报刊评论关注{'、'.join(topics)}。",
+            main_excerpt,
+            "这些讨论共同指向一个判断：回应公众关切，既要解释规则，也要把具体服务做到位。",
+        ]
     )
     tags = "#今日观点 #媒体评论 #时事观察 #热点解读"
     return title, body, tags
@@ -577,15 +645,14 @@ def main() -> int:
     if not args.no_notes:
         number_title, number_body, number_tags = numbers_caption(number_events, generated_at)
         opinion_title, opinion_body, opinion_tags = opinion_caption(commentary, generated_at)
-        date_prefix = generated_at.strftime("%Y-%m-%d")
         note1 = write_note(
-            f"{date_prefix} 今日数字速览",
-            note_html("今日时事｜数字速览", number_title, number_body, number_tags),
+            number_title,
+            note_html(number_body, number_tags),
             numbers_png,
         )
         note2 = write_note(
-            f"{date_prefix} 今日观点卡",
-            note_html("今日时事｜观点卡", opinion_title, opinion_body, opinion_tags),
+            opinion_title,
+            note_html(opinion_body, opinion_tags),
             opinion_png,
         )
         print(f"notes: {note1} | {note2}")
